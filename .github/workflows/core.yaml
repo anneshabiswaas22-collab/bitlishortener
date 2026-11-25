@@ -1,0 +1,77 @@
+name: Core CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CI: "true"
+      NODE_OPTIONS: "--max-old-space-size=4608"
+      NEXT_TELEMETRY_DISABLED: "1"
+      TURBO_TELEMETRY_DISABLED: "1"
+      DATABASE_URL: "mysql://root:@127.0.0.1:3306/planetscale"
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "23.11.0"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web workspace packages
+        run: pnpm turbo build --filter='web^...' --concurrency=1
+
+      - name: Lint Next.js source
+        run: |
+          lint_dir="$RUNNER_TEMP/dub-next-eslint"
+          npm install --prefix "$lint_dir" --no-save --no-package-lock --ignore-scripts @next/eslint-plugin-next@15.5.8
+          pnpm exec eslint --no-eslintrc --no-inline-config --config .github/next-eslint.cjs \
+            --resolve-plugins-relative-to "$lint_dir" --ext .js,.jsx,.ts,.tsx \
+            apps/web/app apps/web/lib apps/web/ui
+
+      - name: Lint Stripe extension
+        run: pnpm --dir packages/stripe-app lint
+
+      - name: Run service-independent web unit tests
+        working-directory: apps/web
+        run: |
+          pnpm exec vitest run --no-file-parallelism \
+            tests/misc/base64.test.ts \
+            tests/misc/create-id.test.ts \
+            tests/misc/format-percentage.test.ts \
+            tests/misc/ip-cidr.test.ts \
+            tests/misc/normalize-email.test.ts \
+            tests/misc/process-in-batches.test.ts \
+            tests/misc/safe-decode-uri-component.test.ts \
+            tests/misc/smart-truncate.test.ts
+
+      - name: Generate and validate Prisma client and schema
+        run: |
+          pnpm --filter web prisma:generate
+          pnpm --filter web exec prisma validate --schema=./prisma/schema
+
+      - name: Check TypeScript
+        run: |
+          pnpm --filter @dub/utils check-types
+          pnpm --filter @dub/ui check-types
+          pnpm --filter web exec tsc --noEmit
